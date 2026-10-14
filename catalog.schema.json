@@ -50,6 +50,12 @@
             "type": "string",
             "pattern": "^/",
             "description": "HTTP path polled after start. Defaults to /."
+          },
+          "hostPort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Localhost port published when PUBLISH_HOST is set."
           }
         }
       }

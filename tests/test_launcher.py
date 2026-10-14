@@ -13,6 +13,8 @@ from app.launcher import (
     LaunchError,
     LaunchManager,
     container_name,
+    container_run_options,
+    game_url,
     traefik_labels,
 )
 from app.settings import Settings, SettingsError, load_settings
@@ -53,6 +55,7 @@ def settings(tmp_path: Path) -> Settings:
         pids_limit=256,
         health_timeout_seconds=5,
         git_ssh_key_path=None,
+        publish_host=None,
     )
 
 
@@ -122,6 +125,17 @@ def manager(tmp_path: Path, git: FakeGit | None = None, docker: FakeDocker | Non
         docker=docker or FakeDocker(),
         health_check=health,
     )
+
+
+def test_local_mode_publishes_a_localhost_port(tmp_path: Path):
+    from dataclasses import replace
+
+    local = replace(settings(tmp_path), publish_host="127.0.0.1", public_scheme="http")
+    game = replace(example_game(), host_port=8081)
+    assert game_url(local, game) == "http://127.0.0.1:8081"
+    options = container_run_options(game, local)
+    assert options["ports"] == {"8080/tcp": ("127.0.0.1", 8081)}
+    assert "network" not in options
 
 
 def test_labels_publish_the_game_host(tmp_path: Path):

@@ -29,6 +29,7 @@ class Settings:
     pids_limit: int
     health_timeout_seconds: float
     git_ssh_key_path: str | None
+    publish_host: str | None
 
     @property
     def nano_cpus(self) -> int:
@@ -36,11 +37,18 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    domain = _required("GAMES_DOMAIN")
-    if _DOMAIN.fullmatch(domain) is None:
+    publish_host = os.environ.get("PUBLISH_HOST", "").strip() or None
+    if publish_host is not None and publish_host not in {"127.0.0.1", "localhost"}:
+        raise SettingsError("PUBLISH_HOST must be 127.0.0.1 or localhost")
+
+    if publish_host is None:
+        domain = _required("GAMES_DOMAIN")
+    else:
+        domain = os.environ.get("GAMES_DOMAIN", "").strip() or "localhost"
+    if publish_host is None and _DOMAIN.fullmatch(domain) is None:
         raise SettingsError("GAMES_DOMAIN must be a DNS name")
 
-    scheme = os.environ.get("PUBLIC_SCHEME", "https").strip().lower()
+    scheme = os.environ.get("PUBLIC_SCHEME", "http" if publish_host else "https").strip().lower()
     if scheme not in {"http", "https"}:
         raise SettingsError("PUBLIC_SCHEME must be http or https")
 
@@ -77,6 +85,7 @@ def load_settings() -> Settings:
         pids_limit=pids_limit,
         health_timeout_seconds=health_timeout,
         git_ssh_key_path=key_path,
+        publish_host=publish_host,
     )
 
 

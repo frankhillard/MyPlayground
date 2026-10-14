@@ -30,6 +30,7 @@ class Game:
     dockerfile: str
     container_port: int
     health_path: str
+    host_port: int | None = None
 
 
 class Catalog:
@@ -66,6 +67,7 @@ class Catalog:
             raise CatalogError("Catalog is unavailable") from exc
 
         games: dict[str, Game] = {}
+        host_ports: set[int] = set()
         for item in document["games"]:
             game_id = item["id"].lower()
             if GAME_ID_RE.fullmatch(game_id) is None:
@@ -74,6 +76,12 @@ class Catalog:
             if game_id in games:
                 logger.error("Duplicate game id %s", game_id)
                 raise CatalogError("Catalog is unavailable")
+            host_port = item.get("hostPort")
+            if host_port is not None:
+                if host_port in host_ports:
+                    logger.error("Duplicate host port %s", host_port)
+                    raise CatalogError("Catalog is unavailable")
+                host_ports.add(host_port)
             games[game_id] = Game(
                 id=game_id,
                 title=item["title"],
@@ -83,6 +91,7 @@ class Catalog:
                 dockerfile=item["dockerfile"],
                 container_port=item["containerPort"],
                 health_path=item.get("healthPath", "/"),
+                host_port=host_port,
             )
         self._games = games
         self._mtime_ns = mtime_ns

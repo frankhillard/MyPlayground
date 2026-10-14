@@ -1,7 +1,8 @@
 # Games the dashboard can launch. Edit this file on the server.
 # Each repository must contain a Dockerfile that listens on 0.0.0.0
-# and on containerPort. The public URL is https://<id>.<GAMES_DOMAIN>.
+# and on containerPort. With PUBLISH_HOST, Open uses http://127.0.0.1:<hostPort>.
 # id is a hostname label. Capitals are folded to lowercase.
+# hostPort is the localhost port used when the dashboard runs with PUBLISH_HOST.
 games:
   - id: contraption
     title: Contraption
@@ -10,6 +11,7 @@ games:
     ref: main
     dockerfile: Dockerfile
     containerPort: 8080
+    hostPort: 8081
     healthPath: /
 
   - id: cordon
@@ -19,4 +21,5 @@ games:
     ref: main
     dockerfile: Dockerfile
     containerPort: 8080
+    hostPort: 8082
     healthPath: /
