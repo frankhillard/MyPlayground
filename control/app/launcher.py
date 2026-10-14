@@ -49,8 +49,40 @@ def container_name(game_id: str) -> str:
     return f"{CONTAINER_PREFIX}{game_id}"
 
 
-def game_url(settings: Settings, game_id: str) -> str:
-    return f"{settings.public_scheme}://{game_id}.{settings.games_domain}"
+def game_url(settings: Settings, game: Game) -> str:
+    if settings.publish_host:
+        if game.host_port is None:
+            return ""
+        return f"{settings.public_scheme}://{settings.publish_host}:{game.host_port}"
+    return f"{settings.public_scheme}://{game.id}.{settings.games_domain}"
+
+
+def health_url(settings: Settings, game: Game) -> str:
+    if settings.publish_host:
+        if game.host_port is None:
+            raise LaunchError("Set hostPort in the catalog to open this game on localhost.")
+        return f"http://{settings.publish_host}:{game.host_port}{game.health_path}"
+    return f"http://{container_name(game.id)}:{game.container_port}{game.health_path}"
+
+
+def container_run_options(game: Game, settings: Settings) -> dict:
+    options: dict = {
+        "name": container_name(game.id),
+        "detach": True,
+        "mem_limit": settings.memory_limit,
+        "nano_cpus": settings.nano_cpus,
+        "pids_limit": settings.pids_limit,
+        "init": True,
+        "restart_policy": {"Name": "unless-stopped"},
+    }
+    if settings.publish_host:
+        if game.host_port is None:
+            raise LaunchError("Set hostPort in the catalog to open this game on localhost.")
+        options["ports"] = {f"{game.container_port}/tcp": (settings.publish_host, game.host_port)}
+        return options
+    options["network"] = settings.docker_network
+    options["labels"] = traefik_labels(game, settings)
+    return options
 
 
 def traefik_labels(game: Game, settings: Settings) -> dict[str, str]:
@@ -210,18 +242,7 @@ class DockerOps:
             if cancelled is not None and cancelled.is_set():
                 return
             self.remove(container_name(game.id))
-            client.containers.run(
-                image_tag,
-                name=container_name(game.id),
-                detach=True,
-                network=self.settings.docker_network,
-                labels=traefik_labels(game, self.settings),
-                mem_limit=self.settings.memory_limit,
-                nano_cpus=self.settings.nano_cpus,
-                pids_limit=self.settings.pids_limit,
-                init=True,
-                restart_policy={"Name": "unless-stopped"},
-            )
+            client.containers.run(image_tag, **container_run_options(game, self.settings))
             if cancelled is not None and cancelled.is_set():
                 self.remove(container_name(game.id))
         except LaunchError:
@@ -285,7 +306,7 @@ class LaunchManager:
             "title": game.title,
             "description": game.description,
             "status": status,
-            "url": game_url(self.settings, game.id),
+            "url": game_url(self.settings, game),
             "error": error,
         }
 
@@ -319,6 +340,8 @@ class LaunchManager:
 
     async def _launch(self, game: Game, cancelled: threading.Event) -> None:
         try:
+            if self.settings.publish_host and game.host_port is None:
+                raise LaunchError("Set hostPort in the catalog to open this game on localhost.")
             self._phases[game.id] = "cloning"
             context = await asyncio.to_thread(self.git.sync, game)
             if cancelled.is_set():
@@ -379,7 +402,7 @@ class LaunchManager:
     async def _wait_until_healthy(self, game: Game) -> bool:
         import httpx
 
-        url = f"http://{container_name(game.id)}:{game.container_port}{game.health_path}"
+        url = health_url(self.settings, game)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.health_timeout_seconds
         async with httpx.AsyncClient() as client:
