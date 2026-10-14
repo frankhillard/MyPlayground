@@ -1,0 +1,87 @@
+# Hosted launcher. Copy .env.example to .env and set the four required values.
+# Point DASHBOARD_HOST and *.GAMES_DOMAIN at this machine before starting.
+# Start and stop send Authorization: Bearer $ADMIN_TOKEN. The game list is public.
+#
+# Private repositories: mount a read-only deploy key and set
+# GIT_SSH_KEY_PATH=/run/secrets/git_key on the control service.
+
+name: myplayground
+
+services:
+  traefik:
+    image: traefik:v3.6
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=playground
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?Set ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks:
+      - playground
+
+  control:
+    build:
+      context: .
+      dockerfile: control/Dockerfile
+    restart: unless-stopped
+    environment:
+      CATALOG_PATH: /etc/playground/catalog.yaml
+      CATALOG_SCHEMA_PATH: /app/catalog.schema.json
+      SRC_DIR: /var/lib/playground/src
+      GAMES_DOMAIN: ${GAMES_DOMAIN:?Set GAMES_DOMAIN}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN}
+      DOCKER_NETWORK: playground
+      PUBLIC_SCHEME: https
+      MEMORY_LIMIT: ${MEMORY_LIMIT:-512m}
+      CPU_LIMIT: ${CPU_LIMIT:-1}
+      PIDS_LIMIT: ${PIDS_LIMIT:-256}
+      HEALTH_TIMEOUT_SECONDS: ${HEALTH_TIMEOUT_SECONDS:-60}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./catalog.yaml:/etc/playground/catalog.yaml:ro
+      - playground-src:/var/lib/playground/src
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=playground
+      - traefik.http.routers.dashboard.rule=Host(`${DASHBOARD_HOST:?Set DASHBOARD_HOST}`)
+      - traefik.http.routers.dashboard.entrypoints=websecure
+      - traefik.http.routers.dashboard.tls=true
+      - traefik.http.routers.dashboard.tls.certresolver=le
+      - traefik.http.routers.dashboard.service=dashboard
+      - traefik.http.services.dashboard.loadbalancer.server.port=8000
+    depends_on:
+      - traefik
+    networks:
+      - playground
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/games')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  playground:
+    name: playground
+
+volumes:
+  letsencrypt:
+  playground-src:
