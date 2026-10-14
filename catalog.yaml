@@ -1,0 +1,22 @@
+# Games the dashboard can launch. Edit this file on the server.
+# Each repository must contain a Dockerfile that listens on 0.0.0.0
+# and on containerPort. The public URL is https://<id>.<GAMES_DOMAIN>.
+# id is a hostname label. Capitals are folded to lowercase.
+games:
+  - id: contraption
+    title: Contraption
+    description: Incredible Machine-like puzzle game.
+    git: https://github.com/frankhillard/IncredibleMachine.git
+    ref: main
+    dockerfile: Dockerfile
+    containerPort: 8080
+    healthPath: /
+
+  - id: cordon
+    title: Cordon
+    description: Jezzball-like game.
+    git: https://github.com/frankhillard/jezzball.git
+    ref: main
+    dockerfile: Dockerfile
+    containerPort: 8080
+    healthPath: /
