@@ -40,7 +40,26 @@ def test_list_is_public_and_hides_the_git_url(tmp_path: Path):
     assert body["games"][0]["id"] == "example"
     assert body["games"][0]["status"] == "stopped"
     assert body["games"][0]["url"] == "https://example.play.example.com"
+    assert body["games"][0]["image"] is None
     assert "github.com" not in response.text
+
+
+def test_game_picture_is_served(tmp_path: Path):
+    pictures = tmp_path / "pictures"
+    pictures.mkdir()
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01"
+        b"\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    (pictures / "example.png").write_bytes(png)
+    api = client(tmp_path)
+    listed = api.get("/api/games").json()["games"][0]
+    assert listed["image"] == "/api/games/example/image"
+    image = api.get(listed["image"])
+    assert image.status_code == 200
+    assert image.headers["content-type"].startswith("image/png")
+    assert image.content == png
 
 
 def test_start_and_stop_require_the_admin_token(tmp_path: Path):

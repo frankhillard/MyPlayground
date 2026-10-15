@@ -1,5 +1,9 @@
 # MyPlayground
 
+a dashboard provides for a list of repo the capacity to launch the game in docker.
+
+the list of repo is fixed
+
 ## Run the dashboard
 
 ```bash

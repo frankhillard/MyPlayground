@@ -30,6 +30,12 @@ class Settings:
     health_timeout_seconds: float
     git_ssh_key_path: str | None
     publish_host: str | None
+    pictures_dir: Path | None = None
+
+    def resolved_pictures_dir(self) -> Path:
+        if self.pictures_dir is not None:
+            return self.pictures_dir
+        return self.catalog_path.parent / "pictures"
 
     @property
     def nano_cpus(self) -> int:
@@ -71,6 +77,7 @@ def load_settings() -> Settings:
         raise SettingsError("DOCKER_NETWORK must be a user-defined Docker network name")
 
     key_path = os.environ.get("GIT_SSH_KEY_PATH", "").strip() or None
+    pictures = os.environ.get("PICTURES_DIR", "").strip()
 
     return Settings(
         catalog_path=Path(os.environ.get("CATALOG_PATH", "/etc/playground/catalog.yaml")),
@@ -86,6 +93,7 @@ def load_settings() -> Settings:
         health_timeout_seconds=health_timeout,
         git_ssh_key_path=key_path,
         publish_host=publish_host,
+        pictures_dir=Path(pictures) if pictures else None,
     )
 
 
