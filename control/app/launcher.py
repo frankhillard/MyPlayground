@@ -49,6 +49,20 @@ def container_name(game_id: str) -> str:
     return f"{CONTAINER_PREFIX}{game_id}"
 
 
+def picture_file(settings: Settings, game_id: str) -> Path | None:
+    root = settings.resolved_pictures_dir().resolve()
+    path = (root / f"{game_id}.png").resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return None
+    return path
+
+
+def _image_url(settings: Settings, game_id: str) -> str | None:
+    if picture_file(settings, game_id) is None:
+        return None
+    return f"/api/games/{game_id}/image"
+
+
 def game_url(settings: Settings, game: Game) -> str:
     if settings.publish_host:
         if game.host_port is None:
@@ -307,6 +321,7 @@ class LaunchManager:
             "description": game.description,
             "status": status,
             "url": game_url(self.settings, game),
+            "image": _image_url(self.settings, game.id),
             "error": error,
         }
 
