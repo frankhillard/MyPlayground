@@ -23,3 +23,13 @@ games:
     containerPort: 80
     hostPort: 8082
     healthPath: /
+
+  - id: blasterman
+    title: Blasterman
+    description: Bomberman-like game.
+    git: https://github.com/frankhillard/bomberman.git
+    ref: main
+    dockerfile: Dockerfile
+    containerPort: 8080
+    hostPort: 8083
+    healthPath: /
