@@ -30,7 +30,7 @@ def test_dashboard_lists_launch_stop_and_open(tmp_path: Path):
     page = response.text
     assert "Launch" in page
     assert "Stop" in page
-    assert "Open" in page
+    assert "Play" in page
 
 
 def test_list_is_public_and_hides_the_git_url(tmp_path: Path):
