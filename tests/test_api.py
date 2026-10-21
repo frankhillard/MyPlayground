@@ -31,6 +31,9 @@ def test_dashboard_lists_launch_stop_and_open(tmp_path: Path):
     assert "Launch" in page
     assert "Stop" in page
     assert "Play" in page
+    assert "Clean" in page
+    assert ">Games<" in page
+    assert ">dev<" in page
 
 
 def test_list_is_public_and_hides_the_git_url(tmp_path: Path):
@@ -41,6 +44,10 @@ def test_list_is_public_and_hides_the_git_url(tmp_path: Path):
     assert body["games"][0]["status"] == "stopped"
     assert body["games"][0]["url"] == "https://example.play.example.com"
     assert body["games"][0]["image"] is None
+    assert body["dev"][0]["id"] == "tracker"
+    assert body["dev"][0]["status"] == "stopped"
+    assert "newton-live" in body["dev"][0]["exec"]
+    assert "git" not in body["dev"][0]
     assert "github.com" not in response.text
 
 
@@ -82,6 +89,25 @@ def test_start_and_stop_require_the_admin_token(tmp_path: Path):
 
     unknown = api.post(
         "/api/games/missing/stop",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert unknown.status_code == 404
+
+
+def test_dev_launch_stop_and_clean_require_the_admin_token(tmp_path: Path):
+    api = client(tmp_path)
+    denied = api.post("/api/dev/tracker/start")
+    assert denied.status_code == 401
+
+    started = api.post(
+        "/api/dev/tracker/start",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert started.status_code == 202
+    assert started.json()["status"] == "starting"
+
+    unknown = api.post(
+        "/api/dev/missing/clean",
         headers={"Authorization": "Bearer test-token"},
     )
     assert unknown.status_code == 404

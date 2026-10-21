@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 
 from app.catalog import GAME_ID_RE, CatalogError
-from app.launcher import AlreadyStarting, GameNotFound, LaunchManager, picture_file
+from app.launcher import AlreadyStarting, DevNotFound, GameNotFound, LaunchManager, picture_file
 
 _STATIC = Path(__file__).resolve().parent / "static" / "index.html"
 _TITLE_FONT = Path(__file__).resolve().parent / "static" / "fonts" / "Caveat.ttf"
@@ -36,7 +36,7 @@ def create_app(manager: LaunchManager) -> FastAPI:
         if GAME_ID_RE.fullmatch(game_id) is None:
             raise HTTPException(status_code=404, detail="Unknown game")
         try:
-            known = manager.catalog.get(game_id) is not None
+            known = manager.catalog.has(game_id)
         except CatalogError as exc:
             raise HTTPException(status_code=500, detail="Catalog is unavailable") from exc
         path = picture_file(manager.settings, game_id) if known else None
@@ -47,7 +47,7 @@ def create_app(manager: LaunchManager) -> FastAPI:
     @app.get("/api/games")
     def list_games() -> dict:
         try:
-            return {"games": manager.list_games()}
+            return {"games": manager.list_games(), "dev": manager.list_dev()}
         except CatalogError as exc:
             raise HTTPException(status_code=500, detail="Catalog is unavailable") from exc
 
@@ -67,19 +67,43 @@ def create_app(manager: LaunchManager) -> FastAPI:
         _require_admin(manager, authorization)
         return await _act(manager.stop, game_id)
 
+    @app.post("/api/dev/{repo_id}/start", status_code=202)
+    async def start_dev(
+        repo_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        _require_admin(manager, authorization)
+        return await _act(manager.start_dev, repo_id, "Unknown repository")
+
+    @app.post("/api/dev/{repo_id}/stop")
+    async def stop_dev(
+        repo_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        _require_admin(manager, authorization)
+        return await _act(manager.stop_dev, repo_id, "Unknown repository")
+
+    @app.post("/api/dev/{repo_id}/clean")
+    async def clean_dev(
+        repo_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        _require_admin(manager, authorization)
+        return await _act(manager.clean_dev, repo_id, "Unknown repository")
+
     return app
 
 
-async def _act(action, game_id: str) -> dict:
-    game_id = game_id.lower()
-    if GAME_ID_RE.fullmatch(game_id) is None:
-        raise HTTPException(status_code=404, detail="Unknown game")
+async def _act(action, item_id: str, missing: str = "Unknown game") -> dict:
+    item_id = item_id.lower()
+    if GAME_ID_RE.fullmatch(item_id) is None:
+        raise HTTPException(status_code=404, detail=missing)
     try:
-        return await action(game_id)
-    except GameNotFound as exc:
-        raise HTTPException(status_code=404, detail="Unknown game") from exc
+        return await action(item_id)
+    except (GameNotFound, DevNotFound) as exc:
+        raise HTTPException(status_code=404, detail=missing) from exc
     except AlreadyStarting as exc:
-        raise HTTPException(status_code=409, detail="Game is already starting") from exc
+        raise HTTPException(status_code=409, detail="Already starting") from exc
     except CatalogError as exc:
         raise HTTPException(status_code=500, detail="Catalog is unavailable") from exc
 

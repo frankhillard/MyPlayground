@@ -33,12 +33,24 @@ class Game:
     host_port: int | None = None
 
 
+@dataclass(frozen=True)
+class DevRepo:
+    id: str
+    title: str
+    description: str
+    git: str
+    ref: str
+    image_command: str
+    command: str
+
+
 class Catalog:
     def __init__(self, path: Path, schema_path: Path) -> None:
         self.path = path
         self.schema_path = schema_path
         self._mtime_ns: int | None = None
         self._games: dict[str, Game] = {}
+        self._dev: dict[str, DevRepo] = {}
 
     def get(self, game_id: str) -> Game | None:
         self._reload()
@@ -47,6 +59,14 @@ class Catalog:
     def games(self) -> list[Game]:
         self._reload()
         return list(self._games.values())
+
+    def dev_repos(self) -> list[DevRepo]:
+        self._reload()
+        return list(self._dev.values())
+
+    def has(self, item_id: str) -> bool:
+        self._reload()
+        return item_id in self._games or item_id in self._dev
 
     def _reload(self) -> None:
         try:
@@ -66,16 +86,11 @@ class Catalog:
             logger.error("Catalog could not be read: %s", exc)
             raise CatalogError("Catalog is unavailable") from exc
 
+        seen: set[str] = set()
         games: dict[str, Game] = {}
         host_ports: set[int] = set()
         for item in document["games"]:
-            game_id = item["id"].lower()
-            if GAME_ID_RE.fullmatch(game_id) is None:
-                logger.error("Game id %s is not a DNS label", item["id"])
-                raise CatalogError("Catalog is unavailable")
-            if game_id in games:
-                logger.error("Duplicate game id %s", game_id)
-                raise CatalogError("Catalog is unavailable")
+            game_id = _catalog_id(item["id"], seen)
             host_port = item.get("hostPort")
             if host_port is not None:
                 if host_port in host_ports:
@@ -93,5 +108,30 @@ class Catalog:
                 health_path=item.get("healthPath", "/"),
                 host_port=host_port,
             )
+        dev: dict[str, DevRepo] = {}
+        for item in document.get("dev") or []:
+            repo_id = _catalog_id(item["id"], seen)
+            dev[repo_id] = DevRepo(
+                id=repo_id,
+                title=item["title"],
+                description=item["description"],
+                git=item["git"],
+                ref=item["ref"],
+                image_command=item["image"],
+                command=item["exec"],
+            )
         self._games = games
+        self._dev = dev
         self._mtime_ns = mtime_ns
+
+
+def _catalog_id(raw: str, seen: set[str]) -> str:
+    item_id = raw.lower()
+    if GAME_ID_RE.fullmatch(item_id) is None:
+        logger.error("Catalog id %s is not a DNS label", raw)
+        raise CatalogError("Catalog is unavailable")
+    if item_id in seen:
+        logger.error("Duplicate catalog id %s", item_id)
+        raise CatalogError("Catalog is unavailable")
+    seen.add(item_id)
+    return item_id

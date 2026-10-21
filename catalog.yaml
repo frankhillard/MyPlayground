@@ -33,3 +33,22 @@ games:
     containerPort: 8080
     hostPort: 8083
     healthPath: /
+
+# Repositories listed on the dev tab.
+dev:
+  - id: ball-tracker
+    title: BallTracker
+    description: launch the camera and track the ball and interpolate the curve function.
+    git: https://github.com/frankhillard/newton_project_ai.git
+    ref: main
+    image: |-
+      docker build -t newton-live .
+      xhost +local:docker
+    exec: |-
+      docker run --rm -it \
+        --device /dev/video0 \
+        --group-add video \
+        -e DISPLAY=$DISPLAY \
+        -e QT_X11_NO_MITSHM=1 \
+        -v /tmp/.X11-unix:/tmp/.X11-unix \
+        newton-live python live.py --max-poly-degree 2
