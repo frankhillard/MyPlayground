@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Playground game catalog",
+  "title": "Playground catalog",
   "type": "object",
   "additionalProperties": false,
   "required": ["games"],
@@ -56,6 +56,52 @@
             "minimum": 1,
             "maximum": 65535,
             "description": "Localhost port published when PUBLISH_HOST is set."
+          }
+        }
+      }
+    },
+    "dev": {
+      "type": "array",
+      "description": "Repositories listed on the dev tab. Omitted means an empty list.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "description", "git", "ref", "image", "exec"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$",
+            "description": "DNS label. Capitals are folded to lowercase. Must be unique across games and dev."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "git": {
+            "type": "string",
+            "pattern": "^(https://|git@|ssh://)\\S+$",
+            "description": "Repository URL. Use https, git@, or ssh. Do not embed credentials."
+          },
+          "ref": {
+            "type": "string",
+            "pattern": "^(?!-)(?!.*\\.\\.)[A-Za-z0-9._/-]+$",
+            "description": "Branch or tag."
+          },
+          "image": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "docker build command, optionally followed by xhost +local:docker. Launch builds when the image is missing, then runs xhost once per dashboard session."
+          },
+          "exec": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "docker run command used by Launch after the image command. Stop removes that container. Clean deletes the image named in the command."
           }
         }
       }

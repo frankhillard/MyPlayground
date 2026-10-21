@@ -135,10 +135,32 @@
         color: var(--danger);
       }
 
-      #games {
+      .tabs {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .tabs button {
+        background: transparent;
+        color: var(--muted);
+        border-color: var(--line);
+      }
+
+      .tabs button[aria-selected="true"] {
+        background: var(--card);
+        color: var(--ink);
+        border-color: #b08948;
+      }
+
+      .list {
         display: grid;
         gap: 0.75rem;
         padding-bottom: 3rem;
+      }
+
+      .list[hidden] {
+        display: none;
       }
 
       article {
@@ -199,10 +221,22 @@
         color: #e0b15a;
       }
 
-      .url {
+      .url,
+      .command {
         color: var(--muted);
         font-size: 0.9rem;
         overflow-wrap: anywhere;
+      }
+
+      .command {
+        margin: 0.8rem 0 0;
+        padding: 0.55rem 0.7rem;
+        background: #0a0a0a;
+        border: 1px solid var(--line);
+        border-radius: 0.4rem;
+        color: var(--ink);
+        font-family: ui-monospace, "Cascadia Code", monospace;
+        white-space: pre-wrap;
       }
 
       .error {
@@ -238,7 +272,8 @@
         color: var(--accent-ink);
       }
 
-      button.stop {
+      button.stop,
+      button.clean {
         background: var(--danger-bg);
         color: var(--danger);
         border-color: #f0d0d0;
@@ -286,11 +321,20 @@
       </label>
       <p id="notice" role="status"></p>
     </header>
-    <main id="games"></main>
+    <main>
+      <div class="tabs" role="tablist" aria-label="Catalog">
+        <button type="button" role="tab" id="tab-games" aria-selected="true" aria-controls="panel-games">Games</button>
+        <button type="button" role="tab" id="tab-dev" aria-selected="false" aria-controls="panel-dev" tabindex="-1">dev</button>
+      </div>
+      <div id="panel-games" class="list" role="tabpanel" aria-labelledby="tab-games"></div>
+      <div id="panel-dev" class="list" role="tabpanel" aria-labelledby="tab-dev" hidden></div>
+    </main>
     <script>
       const tokenInput = document.querySelector("#token");
       const notice = document.querySelector("#notice");
-      const root = document.querySelector("#games");
+      const gamesRoot = document.querySelector("#panel-games");
+      const devRoot = document.querySelector("#panel-dev");
+      const tabs = [...document.querySelectorAll("[role='tab']")];
       const tokenKey = "playgroundAdminToken";
       const labels = {
         stopped: "Stopped",
@@ -298,6 +342,7 @@
         building: "Building",
         running: "Running",
         error: "Error",
+        starting: "Starting",
       };
 
       tokenInput.value = sessionStorage.getItem(tokenKey) || "";
@@ -309,7 +354,20 @@
         notice.textContent = message || "";
       }
 
-      function cardFor(id) {
+      function selectTab(selected) {
+        for (const tab of tabs) {
+          const on = tab === selected;
+          tab.setAttribute("aria-selected", on ? "true" : "false");
+          tab.tabIndex = on ? 0 : -1;
+          document.getElementById(tab.getAttribute("aria-controls")).hidden = !on;
+        }
+      }
+
+      for (const tab of tabs) {
+        tab.addEventListener("click", () => selectTab(tab));
+      }
+
+      function cardFor(root, id) {
         return root.querySelector(`[data-id="${CSS.escape(id)}"]`);
       }
 
@@ -408,26 +466,26 @@
         }
       }
 
-      function render(games) {
+      function render(root, items, build, update, emptyText) {
         const seen = new Set();
-        for (const game of games) {
-          seen.add(game.id);
-          let card = cardFor(game.id);
+        for (const item of items) {
+          seen.add(item.id);
+          let card = cardFor(root, item.id);
           if (!card) {
-            card = buildCard(game);
+            card = build(item);
             root.append(card);
           }
-          updateCard(card, game);
+          update(card, item);
         }
         for (const card of [...root.querySelectorAll("article")]) {
           if (!seen.has(card.dataset.id)) card.remove();
         }
         let empty = root.querySelector(".empty");
-        if (games.length === 0) {
+        if (items.length === 0) {
           if (!empty) {
             empty = document.createElement("p");
             empty.className = "empty";
-            empty.textContent = "No games in the catalog.";
+            empty.textContent = emptyText;
             root.append(empty);
           }
         } else if (empty) {
@@ -435,26 +493,103 @@
         }
       }
 
+      function buildDevCard(repo) {
+        const card = document.createElement("article");
+        card.dataset.id = repo.id;
+        const image = document.createElement("img");
+        image.alt = "";
+        image.hidden = true;
+        const heading = document.createElement("div");
+        heading.className = "heading";
+        const title = document.createElement("h2");
+        const description = document.createElement("p");
+        description.className = "description";
+        const body = document.createElement("div");
+        body.className = "body";
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        const status = document.createElement("span");
+        status.className = "status";
+        meta.append(status);
+        const command = document.createElement("pre");
+        command.className = "command";
+        const error = document.createElement("p");
+        error.className = "error";
+        const actions = document.createElement("div");
+        actions.className = "actions";
+
+        const launch = document.createElement("button");
+        launch.type = "button";
+        launch.className = "launch";
+        launch.textContent = "Launch";
+        launch.addEventListener("click", () => act(repo.id, "start", "dev"));
+
+        const stop = document.createElement("button");
+        stop.type = "button";
+        stop.className = "stop";
+        stop.textContent = "Stop";
+        stop.addEventListener("click", () => act(repo.id, "stop", "dev"));
+
+        const clean = document.createElement("button");
+        clean.type = "button";
+        clean.className = "clean";
+        clean.textContent = "Clean";
+        clean.addEventListener("click", () => act(repo.id, "clean", "dev"));
+
+        actions.append(launch, stop, clean);
+        heading.append(title, description);
+        body.append(meta, command, error, actions);
+        card.append(heading, image, body);
+        return card;
+      }
+
+      function updateDevCard(card, repo) {
+        const image = card.querySelector("img");
+        if (repo.image) {
+          if (image.getAttribute("src") !== repo.image) image.src = repo.image;
+          image.alt = repo.title;
+          image.hidden = false;
+        } else {
+          image.removeAttribute("src");
+          image.alt = "";
+          image.hidden = true;
+        }
+        card.querySelector("h2").textContent = repo.title;
+        card.querySelector(".description").textContent = repo.description;
+        card.querySelector(".command").textContent = repo.exec;
+        const status = card.querySelector(".status");
+        status.dataset.status = repo.status;
+        status.textContent = labels[repo.status] || repo.status;
+        const error = card.querySelector(".error");
+        error.textContent = repo.error || "";
+        error.hidden = !repo.error;
+        const busy = repo.status === "starting";
+        card.querySelector(".launch").disabled = busy;
+        card.querySelector(".stop").disabled = repo.status === "stopped";
+        card.querySelector(".clean").disabled = busy;
+      }
+
       async function load() {
         try {
           const response = await fetch("/api/games");
           if (!response.ok) {
-            setNotice("Could not load games.");
+            setNotice("Could not load the catalog.");
             return;
           }
           const body = await response.json();
-          render(body.games || []);
+          render(gamesRoot, body.games || [], buildCard, updateCard, "No games in the catalog.");
+          render(devRoot, body.dev || [], buildDevCard, updateDevCard, "No repos in the dev catalog.");
         } catch (_error) {
-          setNotice("Could not load games.");
+          setNotice("Could not load the catalog.");
         }
       }
 
-      async function act(id, action) {
+      async function act(id, action, collection = "games") {
         setNotice("");
         let response;
         try {
           response = await fetch(
-            `/api/games/${encodeURIComponent(id)}/${action}`,
+            `/api/${collection}/${encodeURIComponent(id)}/${action}`,
             {
               method: "POST",
               headers: { Authorization: `Bearer ${tokenInput.value.trim()}` },
@@ -465,7 +600,7 @@
           return;
         }
         if (response.status === 401) {
-          setNotice("Start and stop need a valid admin token.");
+          setNotice("Launch, stop, and clean need a valid admin token.");
           return;
         }
         if (!response.ok) {

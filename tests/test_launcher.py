@@ -15,6 +15,9 @@ from app.launcher import (
     container_name,
     container_run_options,
     game_url,
+    parse_dev_exec,
+    parse_image_command,
+    parse_docker_run,
     traefik_labels,
 )
 from app.settings import Settings, SettingsError, load_settings
@@ -35,6 +38,16 @@ games:
     dockerfile: Dockerfile
     containerPort: 8080
     healthPath: /
+dev:
+  - id: tracker
+    title: Tracker
+    description: Track a ball.
+    git: https://github.com/example/tracker.git
+    ref: main
+    image: |-
+      docker build -t newton-live .
+      xhost +local:docker
+    exec: docker run --rm -e DISPLAY=$DISPLAY --device /dev/video0 newton-live python live.py --camera 0
 """,
         encoding="utf-8",
     )
@@ -92,6 +105,10 @@ class FakeDocker:
     def __init__(self) -> None:
         self.running: set[str] = set()
         self.removed: list[str] = []
+        self.runs: list = []
+        self.built: list[str] = []
+        self.present_images: set[str] = set()
+        self.images_removed: list[str] = []
         self.fail = False
 
     def inspect(self, name: str) -> ContainerState | None:
@@ -107,6 +124,24 @@ class FakeDocker:
         self.running.add(container_name(game.id))
         if cancelled is not None and cancelled.is_set():
             self.remove(container_name(game.id))
+
+    def image_exists(self, name: str) -> bool:
+        return name in self.present_images
+
+    def build_dev(self, context, build, cancelled=None) -> None:
+        if cancelled is not None and cancelled.is_set():
+            return
+        self.built.append(build.tag)
+        self.present_images.add(build.tag)
+
+    def run_dev(self, repo, spec, cancelled=None) -> None:
+        self.runs.append(spec)
+        if cancelled is not None and cancelled.is_set():
+            return
+        self.running.add(container_name(repo.id))
+
+    def remove_image(self, image: str) -> None:
+        self.images_removed.append(image)
 
     def remove(self, name: str) -> None:
         self.removed.append(name)
@@ -269,3 +304,82 @@ def test_stop_removes_the_container_and_keeps_the_clone(tmp_path: Path):
     assert view["error"] is None
     assert docker.removed == [container_name("example")]
     assert not (tmp_path / "src" / "example").exists()
+
+
+def test_dev_launch_builds_a_missing_image_and_allows_the_display_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("DISPLAY", ":0")
+    calls: list[str] = []
+    monkeypatch.setattr("app.launcher.allow_local_docker_display", lambda: calls.append("xhost"))
+    git = FakeGit()
+    docker = FakeDocker()
+
+    def build_dev(context, build, cancelled=None) -> None:
+        calls.append("build")
+        FakeDocker.build_dev(docker, context, build, cancelled)
+
+    docker.build_dev = build_dev
+    control = manager(tmp_path, git=git, docker=docker)
+
+    async def scenario():
+        view = await control.start_dev("tracker")
+        assert view["status"] == "starting"
+        await control._tasks["tracker"]
+        await control.start_dev("tracker")
+        await control._tasks["tracker"]
+        stopped = await control.stop_dev("tracker")
+        cleaned = await control.clean_dev("tracker")
+        return stopped, cleaned
+
+    stopped, cleaned = asyncio.run(scenario())
+    spec = docker.runs[0]
+    assert spec.image == "newton-live"
+    assert spec.command == ("python", "live.py", "--camera", "0")
+    assert spec.environment == (("DISPLAY", ":0"),)
+    assert spec.devices == ("/dev/video0",)
+    assert git.synced == ["tracker"]
+    assert docker.built == ["newton-live"]
+    assert calls == ["build", "xhost"]
+    assert stopped["status"] == "stopped"
+    assert cleaned["error"] is None
+    assert docker.images_removed == ["newton-live"]
+    assert container_name("tracker") not in docker.running
+
+
+def test_dev_launch_skips_the_build_when_the_image_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("app.launcher.allow_local_docker_display", lambda: None)
+    git = FakeGit()
+    docker = FakeDocker()
+    docker.present_images.add("newton-live")
+    control = manager(tmp_path, git=git, docker=docker)
+
+    async def scenario():
+        await control.start_dev("tracker")
+        await control._tasks["tracker"]
+
+    asyncio.run(scenario())
+    assert git.synced == []
+    assert docker.built == []
+    assert docker.runs[0].image == "newton-live"
+
+
+def test_dev_command_must_be_docker_run():
+    with pytest.raises(LaunchError):
+        parse_docker_run("python live.py")
+
+
+def test_shipped_dev_command_names_the_newton_image(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("DISPLAY", ":1")
+    repo = Catalog(ROOT / "catalog.yaml", ROOT / "catalog.schema.json").dev_repos()[0]
+    spec = parse_dev_exec(repo.command).run
+    build, allow_display = parse_image_command(repo.image_command)
+    assert allow_display is True
+    assert build.tag == "newton-live"
+    assert repo.image_command.rstrip().endswith("xhost +local:docker")
+    assert spec.image == "newton-live"
+    assert spec.command == ("python", "live.py", "--max-poly-degree", "2")
+    assert ("DISPLAY", ":1") in spec.environment
+    assert spec.devices == ("/dev/video0",)
+    assert spec.groups == ("video",)
+    assert spec.volumes[0][:2] == ("/tmp/.X11-unix", "/tmp/.X11-unix")

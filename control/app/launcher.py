@@ -6,13 +6,14 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.catalog import Catalog, CatalogError, Game
+from app.catalog import Catalog, CatalogError, DevRepo, Game
 from app.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,10 @@ _REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$")
 
 
 class GameNotFound(Exception):
+    pass
+
+
+class DevNotFound(Exception):
     pass
 
 
@@ -45,8 +50,228 @@ class ContainerState:
     public_error: str
 
 
+@dataclass(frozen=True)
+class DockerRun:
+    image: str
+    command: tuple[str, ...]
+    devices: tuple[str, ...]
+    groups: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+    volumes: tuple[tuple[str, str, str], ...]
+    auto_remove: bool
+
+
+@dataclass(frozen=True)
+class DockerBuild:
+    tag: str
+    dockerfile: str
+
+
+@dataclass(frozen=True)
+class DevExec:
+    allow_display: bool
+    run: DockerRun
+
+
+_ENV_REF = re.compile(r"\$(\w+)|\$\{(\w+)\}")
+_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,200}$")
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GROUP_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SWITCHES = {"--rm", "-d", "--detach", "--init", "--interactive", "--tty"}
+_VALUE_FLAGS = {
+    "--device": "device",
+    "--group-add": "group",
+    "-e": "env",
+    "--env": "env",
+    "-v": "volume",
+    "--volume": "volume",
+    "--name": "name",
+}
+
+
 def container_name(game_id: str) -> str:
     return f"{CONTAINER_PREFIX}{game_id}"
+
+
+def parse_dev_exec(command: str) -> DevExec:
+    """Read the catalog exec text. It is the docker run command."""
+    return DevExec(allow_display=False, run=parse_docker_run(command))
+
+
+def parse_image_command(command: str) -> tuple[DockerBuild, bool]:
+    """Read the catalog image text. xhost, when present, follows the docker build."""
+    lines = [line for line in command.splitlines() if line.strip()]
+    allow_display = False
+    if lines and lines[-1].strip() == "xhost +local:docker":
+        allow_display = True
+        lines = lines[:-1]
+    if any(line.strip() == "xhost +local:docker" for line in lines):
+        raise LaunchError("xhost must follow the docker build")
+    if not lines:
+        raise LaunchError("The image command must be a docker build")
+    return parse_docker_build("\n".join(lines)), allow_display
+
+
+def parse_docker_build(command: str) -> DockerBuild:
+    """Read a catalog ``docker build`` command. The context is the cloned repository."""
+    try:
+        argv = shlex.split(command.strip(), posix=True)
+    except ValueError as exc:
+        raise LaunchError("The image command could not be read") from exc
+    if len(argv) < 3 or argv[0] != "docker" or argv[1] != "build":
+        raise LaunchError("The image command must be a docker build")
+    tag: str | None = None
+    dockerfile = "Dockerfile"
+    context: str | None = None
+    index = 2
+    while index < len(argv):
+        token = argv[index]
+        if token in {"-t", "--tag"}:
+            if index + 1 >= len(argv):
+                raise LaunchError("The image command is missing a tag")
+            tag = argv[index + 1]
+            index += 2
+            continue
+        if token.startswith("--tag="):
+            tag = token.split("=", 1)[1]
+            index += 1
+            continue
+        if token in {"-f", "--file"}:
+            if index + 1 >= len(argv):
+                raise LaunchError("The image command is missing a Dockerfile")
+            dockerfile = argv[index + 1]
+            index += 2
+            continue
+        if token.startswith("-"):
+            raise LaunchError("The image command uses an unsupported option")
+        if context is not None:
+            raise LaunchError("The image command must build the repository")
+        context = token
+        index += 1
+    if not tag or _IMAGE_RE.fullmatch(tag) is None:
+        raise LaunchError("The image command must name an image tag")
+    if context != ".":
+        raise LaunchError("The image command must build the repository")
+    return DockerBuild(tag=tag, dockerfile=dockerfile)
+
+
+def allow_local_docker_display() -> None:
+    try:
+        result = subprocess.run(
+            ["xhost", "+local:docker"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("xhost could not run: %s", exc)
+        raise LaunchError("Could not allow Docker to use the display") from exc
+    if result.returncode != 0:
+        logger.warning("xhost exited %s: %s", result.returncode, result.stderr.strip())
+        raise LaunchError("Could not allow Docker to use the display")
+
+
+def parse_docker_run(command: str) -> DockerRun:
+    """Read a catalog ``docker run`` command. The browser never sends this text."""
+    text = re.sub(r"\\\s*\n", " ", command.strip())
+    try:
+        argv = shlex.split(text, posix=True)
+    except ValueError as exc:
+        raise LaunchError("The dev command could not be read") from exc
+    if len(argv) < 3 or argv[0] != "docker" or argv[1] != "run":
+        raise LaunchError("The dev command must be a docker run")
+
+    devices: list[str] = []
+    groups: list[str] = []
+    environment: list[tuple[str, str]] = []
+    volumes: list[tuple[str, str, str]] = []
+    auto_remove = False
+    index = 2
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            break
+        if token in _SWITCHES or token in {"-i", "-t", "-it", "-d"}:
+            auto_remove = auto_remove or token == "--rm"
+            index += 1
+            continue
+        if token.startswith("-") and not token.startswith("--") and set(token[1:]) <= {"i", "t", "d"}:
+            index += 1
+            continue
+        kind = _VALUE_FLAGS.get(token)
+        if kind is None and token.startswith("--name="):
+            index += 1
+            continue
+        if kind is None:
+            if token.startswith("-"):
+                raise LaunchError("The dev command uses an unsupported option")
+            break
+        if index + 1 >= len(argv):
+            raise LaunchError("The dev command is missing an option value")
+        value = argv[index + 1]
+        index += 2
+        if kind == "name":
+            continue
+        if kind == "device":
+            devices.append(_device(value))
+        elif kind == "group":
+            if _GROUP_RE.fullmatch(value) is None:
+                raise LaunchError("The dev command has an invalid group")
+            groups.append(value)
+        elif kind == "env":
+            environment.append(_env_entry(value))
+        else:
+            volumes.append(_volume(value))
+    if index >= len(argv):
+        raise LaunchError("The dev command must name a docker image")
+    image = argv[index]
+    if _IMAGE_RE.fullmatch(image) is None:
+        raise LaunchError("The dev command names an invalid image")
+    return DockerRun(
+        image=image,
+        command=tuple(argv[index + 1 :]),
+        devices=tuple(devices),
+        groups=tuple(groups),
+        environment=tuple(environment),
+        volumes=tuple(volumes),
+        auto_remove=auto_remove,
+    )
+
+
+def _expand_env(value: str) -> str:
+    return _ENV_REF.sub(lambda match: os.environ.get(match.group(1) or match.group(2), ""), value)
+
+
+def _device(value: str) -> str:
+    path = value.split(":", 1)[0]
+    if not path.startswith("/dev/") or ".." in Path(path).parts:
+        raise LaunchError("The dev command has an invalid device")
+    return value
+
+
+def _env_entry(value: str) -> tuple[str, str]:
+    key, separator, raw = value.partition("=")
+    if _ENV_KEY_RE.fullmatch(key) is None:
+        raise LaunchError("The dev command has an invalid environment name")
+    if separator:
+        return key, _expand_env(raw)
+    return key, os.environ.get(key, "")
+
+
+def _volume(value: str) -> tuple[str, str, str]:
+    parts = value.split(":")
+    if len(parts) == 2:
+        host, container, mode = parts[0], parts[1], "rw"
+    elif len(parts) == 3 and parts[2] in {"rw", "ro"}:
+        host, container, mode = parts
+    else:
+        raise LaunchError("The dev command has an invalid volume")
+    for path in (host, container):
+        if not path.startswith("/") or ".." in Path(path).parts:
+            raise LaunchError("The dev command has an invalid volume")
+    return host, container, mode
 
 
 def picture_file(settings: Settings, game_id: str) -> Path | None:
@@ -118,7 +343,7 @@ class GitOps:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def sync(self, game: Game) -> Path:
+    def sync(self, game: Game | DevRepo) -> Path:
         if _REF_RE.fullmatch(game.ref) is None or any(char.isspace() for char in game.git):
             raise LaunchError("Could not fetch the game repository")
         root = self.settings.src_dir.resolve()
@@ -226,9 +451,9 @@ class DockerOps:
         state = container.attrs.get("State", {})
         running = bool(state.get("Running"))
         if state.get("OOMKilled"):
-            public_error = "The game ran out of memory"
+            public_error = "The container ran out of memory"
         else:
-            public_error = "The game container stopped"
+            public_error = "The container stopped"
         return ContainerState(running=running, public_error=public_error)
 
     def build_and_run(
@@ -264,6 +489,80 @@ class DockerOps:
         except docker.errors.DockerException as exc:
             logger.warning("Docker failed for %s: %s", game.id, exc)
             raise LaunchError("Could not build or start the container") from exc
+
+    def image_exists(self, name: str) -> bool:
+        import docker
+
+        try:
+            docker.from_env().images.get(name)
+        except docker.errors.ImageNotFound:
+            return False
+        except docker.errors.DockerException as exc:
+            logger.warning("Docker is unavailable while looking for %s: %s", name, exc)
+            raise LaunchError("Container runtime is unavailable") from exc
+        return True
+
+    def build_dev(self, context: Path, build: DockerBuild, cancelled: threading.Event | None = None) -> None:
+        root = context.resolve()
+        dockerfile = _dockerfile_path(root, build.dockerfile)
+        if cancelled is not None and cancelled.is_set():
+            return
+        import docker
+
+        try:
+            docker.from_env().images.build(
+                path=str(root),
+                dockerfile=dockerfile,
+                tag=build.tag,
+                rm=True,
+                forcerm=True,
+            )
+        except docker.errors.DockerException as exc:
+            logger.warning("Docker build failed for %s: %s", build.tag, exc)
+            raise LaunchError("Could not build the image") from exc
+
+    def run_dev(self, repo: DevRepo, spec: DockerRun, cancelled: threading.Event | None = None) -> None:
+        if cancelled is not None and cancelled.is_set():
+            return
+        import docker
+
+        self.remove(container_name(repo.id))
+        if cancelled is not None and cancelled.is_set():
+            return
+        volumes = {
+            host: {"bind": container, "mode": mode}
+            for host, container, mode in spec.volumes
+        }
+        try:
+            docker.from_env().containers.run(
+                spec.image,
+                list(spec.command) or None,
+                name=container_name(repo.id),
+                detach=True,
+                auto_remove=spec.auto_remove,
+                devices=list(spec.devices) or None,
+                group_add=list(spec.groups) or None,
+                environment=dict(spec.environment) or None,
+                volumes=volumes or None,
+            )
+        except docker.errors.ImageNotFound as exc:
+            raise LaunchError(f"Docker image {spec.image} was not found") from exc
+        except docker.errors.DockerException as exc:
+            logger.warning("Docker failed for %s: %s", repo.id, exc)
+            raise LaunchError("Could not start the container") from exc
+        if cancelled is not None and cancelled.is_set():
+            self.remove(container_name(repo.id))
+
+    def remove_image(self, image: str) -> None:
+        import docker
+
+        try:
+            docker.from_env().images.remove(image, force=True)
+        except docker.errors.ImageNotFound:
+            return
+        except docker.errors.DockerException as exc:
+            logger.warning("Could not delete image %s: %s", image, exc)
+            raise LaunchError("Could not delete the image") from exc
 
     def remove(self, name: str) -> None:
         import docker
@@ -305,16 +604,17 @@ class LaunchManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancel_flags: dict[str, threading.Event] = {}
         self._lock = asyncio.Lock()
+        self._display_ready = False
+        self._display_lock = threading.Lock()
 
     def list_games(self) -> list[dict]:
-        try:
-            games = self.catalog.games()
-        except CatalogError:
-            raise
-        return [self.describe(game) for game in games]
+        return [self.describe(game) for game in self.catalog.games()]
+
+    def list_dev(self) -> list[dict]:
+        return [self.describe_dev(repo) for repo in self.catalog.dev_repos()]
 
     def describe(self, game: Game) -> dict:
-        status, error = self._status(game)
+        status, error = self._status(game.id)
         return {
             "id": game.id,
             "title": game.title,
@@ -322,6 +622,18 @@ class LaunchManager:
             "status": status,
             "url": game_url(self.settings, game),
             "image": _image_url(self.settings, game.id),
+            "error": error,
+        }
+
+    def describe_dev(self, repo: DevRepo) -> dict:
+        status, error = self._status(repo.id)
+        return {
+            "id": repo.id,
+            "title": repo.title,
+            "description": repo.description,
+            "exec": repo.command,
+            "status": status,
+            "image": _image_url(self.settings, repo.id),
             "error": error,
         }
 
@@ -352,6 +664,93 @@ class LaunchManager:
         self._errors.pop(game_id, None)
         self._phases.pop(game_id, None)
         return self.describe(game)
+
+    async def start_dev(self, repo_id: str) -> dict:
+        repo = self._dev(repo_id)
+        async with self._lock:
+            task = self._tasks.get(repo_id)
+            if task is not None and not task.done():
+                raise AlreadyStarting
+            self._errors.pop(repo_id, None)
+            self._phases[repo_id] = "starting"
+            cancelled = threading.Event()
+            self._cancel_flags[repo_id] = cancelled
+            self._tasks[repo_id] = asyncio.create_task(self._launch_dev(repo, cancelled))
+        return self.describe_dev(repo)
+
+    async def stop_dev(self, repo_id: str) -> dict:
+        repo = self._dev(repo_id)
+        await self._cancel(repo_id)
+        await asyncio.to_thread(self.docker.remove, container_name(repo_id))
+        self._errors.pop(repo_id, None)
+        self._phases.pop(repo_id, None)
+        return self.describe_dev(repo)
+
+    async def clean_dev(self, repo_id: str) -> dict:
+        repo = self._dev(repo_id)
+        await self._cancel(repo_id)
+        await asyncio.to_thread(self.docker.remove, container_name(repo_id))
+        try:
+            spec = parse_dev_exec(repo.command).run
+            await asyncio.to_thread(self.docker.remove_image, spec.image)
+        except LaunchError as exc:
+            self._errors[repo_id] = exc.public_message
+            return self.describe_dev(repo)
+        self._errors.pop(repo_id, None)
+        self._phases.pop(repo_id, None)
+        return self.describe_dev(repo)
+
+    def _prepare_display(self) -> None:
+        with self._display_lock:
+            if self._display_ready:
+                return
+            allow_local_docker_display()
+            self._display_ready = True
+
+    async def _launch_dev(self, repo: DevRepo, cancelled: threading.Event) -> None:
+        try:
+            spec = parse_dev_exec(repo.command).run
+            build, allow_display = parse_image_command(repo.image_command)
+            if cancelled.is_set():
+                return
+            exists = await asyncio.to_thread(self.docker.image_exists, spec.image)
+            if not exists:
+                self._phases[repo.id] = "cloning"
+                context = await asyncio.to_thread(self.git.sync, repo)
+                if cancelled.is_set():
+                    return
+                self._phases[repo.id] = "building"
+                await asyncio.to_thread(self.docker.build_dev, context, build, cancelled)
+                if cancelled.is_set():
+                    return
+            if allow_display:
+                await asyncio.to_thread(self._prepare_display)
+            if cancelled.is_set():
+                return
+            self._phases[repo.id] = "starting"
+            await asyncio.to_thread(self.docker.run_dev, repo, spec, cancelled)
+            self._errors.pop(repo.id, None)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self.docker.remove, container_name(repo.id))
+            raise
+        except LaunchError as exc:
+            logger.warning("Launch failed for %s: %s", repo.id, exc.public_message)
+            self._errors[repo.id] = exc.public_message
+        except Exception:
+            logger.exception("Launch failed for %s", repo.id)
+            self._errors[repo.id] = "Launch failed"
+        finally:
+            self._phases.pop(repo.id, None)
+
+    async def _cancel(self, item_id: str) -> None:
+        async with self._lock:
+            task = self._tasks.get(item_id)
+            cancelled = self._cancel_flags.get(item_id)
+        if cancelled is not None:
+            cancelled.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _launch(self, game: Game, cancelled: threading.Event) -> None:
         try:
@@ -387,20 +786,20 @@ class LaunchManager:
         finally:
             self._phases.pop(game.id, None)
 
-    def _status(self, game: Game) -> tuple[str, str | None]:
-        phase = self._phases.get(game.id)
+    def _status(self, item_id: str) -> tuple[str, str | None]:
+        phase = self._phases.get(item_id)
         if phase:
             return phase, None
         try:
-            state = self.docker.inspect(container_name(game.id))
+            state = self.docker.inspect(container_name(item_id))
         except RuntimeUnavailable:
-            logger.warning("Docker is unavailable while reading %s", game.id)
+            logger.warning("Docker is unavailable while reading %s", item_id)
             return "error", "Container runtime is unavailable"
         if state is not None and state.running:
             return "running", None
         if state is not None:
             return "error", state.public_error
-        stored = self._errors.get(game.id)
+        stored = self._errors.get(item_id)
         if stored:
             return "error", stored
         return "stopped", None
@@ -413,6 +812,15 @@ class LaunchManager:
         if game is None:
             raise GameNotFound
         return game
+
+    def _dev(self, repo_id: str) -> DevRepo:
+        try:
+            matches = [repo for repo in self.catalog.dev_repos() if repo.id == repo_id]
+        except CatalogError:
+            raise
+        if not matches:
+            raise DevNotFound
+        return matches[0]
 
     async def _wait_until_healthy(self, game: Game) -> bool:
         import httpx
