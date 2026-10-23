@@ -36,7 +36,7 @@ games:
 
   - id: paperfold
     title: Paper Fold
-    description: This is a folding puzzle game. .
+    description: This is a folding puzzle game.
     git: https://github.com/frankhillard/paperfold_game.git
     ref: main
     dockerfile: Dockerfile
